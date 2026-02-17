@@ -132,7 +132,7 @@ class PipelineRunner:
             if remaining_notification_slots > 0:
                 for release in unprocessed_releases[:remaining_notification_slots]:
                     summary = self._summarizer.summarize_release(release)
-                    self._discord_client.send_message(_build_release_discord_message(release, summary))
+                    self._discord_client.send_message(build_release_discord_message(release, summary))
                     state = compute_next_release_state(state, [release])
                     self._state_store.save(state)
                     sent_releases.append(release)
@@ -216,7 +216,7 @@ def _build_pull_request_discord_message(pull_request: object, summary: PullReque
     return "\n".join(lines)
 
 
-def _build_release_discord_message(release: object, summary: PullRequestSummary) -> str:
+def build_release_discord_message(release: object, summary: PullRequestSummary) -> str:
     tag_name = _read_pull_request_field(release, "tag_name")
     name = _read_pull_request_field(release, "name")
     html_url = _read_pull_request_field(release, "html_url")

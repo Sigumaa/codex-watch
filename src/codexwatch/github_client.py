@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence, Set
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 import httpx
 
@@ -173,43 +174,42 @@ class GitHubClient:
 
         releases: list[Release] = []
         for item in data:
-            if not isinstance(item, dict):
-                continue
-
-            published_at = item.get("published_at")
-            if not isinstance(published_at, str):
-                continue
-
-            if bool(item.get("draft", False)):
-                continue
-
-            tag_name = _normalize_optional_text(item.get("tag_name"))
-            if tag_name is None:
-                continue
-
-            name = _normalize_optional_text(item.get("name")) or tag_name
-            prerelease = bool(item.get("prerelease", False))
-            if _should_ignore_release(tag_name=tag_name, name=name, prerelease=prerelease):
-                continue
-
-            html_url = _normalize_optional_text(item.get("html_url"))
-            if html_url is None:
-                continue
-
-            releases.append(
-                Release(
-                    id=int(item["id"]),
-                    tag_name=tag_name,
-                    name=name,
-                    html_url=html_url,
-                    published_at=_parse_github_datetime(published_at),
-                    body=_normalize_optional_text(item.get("body")),
-                    prerelease=prerelease,
-                )
-            )
+            release = _parse_release_item(item)
+            if release is not None:
+                releases.append(release)
 
         releases.sort(key=lambda release: (release.published_at, release.id))
         return releases
+
+    def fetch_release_by_tag(self, tag_name: str) -> Release:
+        normalized_tag_name = tag_name.strip()
+        if not normalized_tag_name:
+            raise ValueError("tag_name must not be empty")
+
+        encoded_tag_name = quote(normalized_tag_name, safe="")
+        url = (
+            f"{self._settings.github_api_url}/repos/{self._settings.github_repo}/releases/tags/"
+            f"{encoded_tag_name}"
+        )
+        with httpx.Client(
+            timeout=self._timeout,
+            transport=self._transport,
+            headers=self._build_headers(),
+        ) as client:
+            response = client.get(url)
+            if response.status_code == 404:
+                raise ValueError(f"Release not found for tag: {normalized_tag_name}")
+            response.raise_for_status()
+
+        payload = response.json()
+        release = _parse_release_item(payload)
+        if release is not None:
+            return release
+
+        if _is_release_filtered_out(payload):
+            raise ValueError(f"Release is excluded by filters for tag: {normalized_tag_name}")
+
+        raise ValueError("Unexpected GitHub API response format")
 
     def _build_headers(self) -> dict[str, str]:
         headers = {
@@ -306,3 +306,54 @@ def _should_ignore_release(*, tag_name: str, name: str, prerelease: bool) -> boo
 
     text = f"{tag_name} {name}".lower()
     return "alpha" in text or "α" in text
+
+
+def _parse_release_item(item: object) -> Release | None:
+    if not isinstance(item, dict):
+        return None
+
+    published_at = item.get("published_at")
+    if not isinstance(published_at, str):
+        return None
+
+    if bool(item.get("draft", False)):
+        return None
+
+    tag_name = _normalize_optional_text(item.get("tag_name"))
+    if tag_name is None:
+        return None
+
+    name = _normalize_optional_text(item.get("name")) or tag_name
+    prerelease = bool(item.get("prerelease", False))
+    if _should_ignore_release(tag_name=tag_name, name=name, prerelease=prerelease):
+        return None
+
+    html_url = _normalize_optional_text(item.get("html_url"))
+    if html_url is None:
+        return None
+
+    return Release(
+        id=int(item["id"]),
+        tag_name=tag_name,
+        name=name,
+        html_url=html_url,
+        published_at=_parse_github_datetime(published_at),
+        body=_normalize_optional_text(item.get("body")),
+        prerelease=prerelease,
+    )
+
+
+def _is_release_filtered_out(item: object) -> bool:
+    if not isinstance(item, dict):
+        return False
+
+    if bool(item.get("draft", False)):
+        return True
+
+    tag_name = _normalize_optional_text(item.get("tag_name"))
+    if tag_name is None:
+        return False
+
+    name = _normalize_optional_text(item.get("name")) or tag_name
+    prerelease = bool(item.get("prerelease", False))
+    return _should_ignore_release(tag_name=tag_name, name=name, prerelease=prerelease)

@@ -7,7 +7,10 @@ import logging
 import os
 
 from codexwatch.config import Settings, load_settings
-from codexwatch.pipeline import PipelineRunner
+from codexwatch.discord_client import DiscordClient
+from codexwatch.github_client import GitHubClient
+from codexwatch.pipeline import PipelineRunner, build_release_discord_message
+from codexwatch.summarizer import Summarizer
 from dotenv import load_dotenv
 
 
@@ -26,6 +29,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-dry-run",
         action="store_true",
         help="Disable dry-run mode.",
+    )
+    parser.add_argument(
+        "--release-tag",
+        help="Fetch and summarize a specific release tag.",
+    )
+    parser.add_argument(
+        "--send-release-to-discord",
+        action="store_true",
+        help="Send the release summary to Discord (requires --release-tag).",
     )
     return parser
 
@@ -57,6 +69,8 @@ def _configure_logging() -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.send_release_to_discord and not args.release_tag:
+        parser.error("--send-release-to-discord requires --release-tag")
 
     _configure_logging()
     settings = _apply_cli_overrides(_load_settings_with_cli_dry_run(args), args)
@@ -70,6 +84,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings.poll_interval_minutes,
     )
 
+    if args.release_tag:
+        try:
+            return _run_release_summary_mode(
+                settings=settings,
+                release_tag=args.release_tag,
+                send_to_discord=args.send_release_to_discord,
+                logger=logger,
+            )
+        except Exception as exc:
+            logger.error("Release summary mode failed: %s", exc)
+            return 1
+
     result = PipelineRunner(settings=settings).run()
     if not result.success:
         logger.error("Pipeline failed: %s", result.message)
@@ -80,6 +106,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         result.processed_pr_count,
         result.message,
     )
+    return 0
+
+
+def _run_release_summary_mode(
+    *,
+    settings: Settings,
+    release_tag: str,
+    send_to_discord: bool,
+    logger: logging.Logger,
+) -> int:
+    release = GitHubClient(settings=settings).fetch_release_by_tag(release_tag)
+    summary = Summarizer(settings=settings).summarize_release(release)
+    message = build_release_discord_message(release, summary)
+    print(message)
+
+    if not send_to_discord:
+        return 0
+
+    if settings.dry_run:
+        logger.info("Dry-run enabled; skipping Discord send for release tag=%s", release.tag_name)
+        return 0
+
+    if not settings.discord_webhook_url:
+        logger.error("DISCORD_WEBHOOK_URL is required when --send-release-to-discord is used")
+        return 1
+
+    DiscordClient(settings=settings).send_message(message)
+    logger.info("Release summary sent to Discord for tag=%s", release.tag_name)
     return 0
 
 

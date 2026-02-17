@@ -237,6 +237,68 @@ def test_fetch_releases_filters_alpha_prerelease_and_draft() -> None:
     assert releases[1].published_at == _utc("2026-02-16T09:30:00Z")
 
 
+def test_fetch_release_by_tag_returns_release() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/openai/codex/releases/tags/rust-v0.102.0"
+        payload = {
+            "id": 300,
+            "tag_name": "rust-v0.102.0",
+            "name": "0.102.0",
+            "html_url": "https://example.test/release/rust-v0.102.0",
+            "published_at": "2026-02-17T20:02:35Z",
+            "body": "stable release",
+            "prerelease": False,
+            "draft": False,
+        }
+        return httpx.Response(200, json=payload)
+
+    client = GitHubClient(settings=Settings(), transport=httpx.MockTransport(handler))
+
+    release = client.fetch_release_by_tag("rust-v0.102.0")
+
+    assert release == Release(
+        id=300,
+        tag_name="rust-v0.102.0",
+        name="0.102.0",
+        html_url="https://example.test/release/rust-v0.102.0",
+        published_at=_utc("2026-02-17T20:02:35Z"),
+        body="stable release",
+        prerelease=False,
+    )
+
+
+def test_fetch_release_by_tag_raises_for_not_found() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/openai/codex/releases/tags/not-found"
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    client = GitHubClient(settings=Settings(), transport=httpx.MockTransport(handler))
+
+    with pytest.raises(ValueError, match="Release not found"):
+        client.fetch_release_by_tag("not-found")
+
+
+def test_fetch_release_by_tag_raises_for_filtered_release() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/openai/codex/releases/tags/rust-v0.102.0-alpha.11"
+        payload = {
+            "id": 301,
+            "tag_name": "rust-v0.102.0-alpha.11",
+            "name": "0.102.0-alpha.11",
+            "html_url": "https://example.test/release/rust-v0.102.0-alpha.11",
+            "published_at": "2026-02-17T18:12:16Z",
+            "body": "alpha release",
+            "prerelease": True,
+            "draft": False,
+        }
+        return httpx.Response(200, json=payload)
+
+    client = GitHubClient(settings=Settings(), transport=httpx.MockTransport(handler))
+
+    with pytest.raises(ValueError, match="excluded by filters"):
+        client.fetch_release_by_tag("rust-v0.102.0-alpha.11")
+
+
 def test_select_unprocessed_pull_requests_filters_by_last_merged_at_and_processed_ids() -> None:
     last_merged_at = _utc("2026-02-16T10:00:00Z")
     pull_requests = [

@@ -20,6 +20,7 @@
 - 通知成功ごとにstateを保存する。
 - 1回の実行通知件数は `CODEXWATCH_MAX_NOTIFICATIONS_PER_RUN`（default: 20）で制限する。
 - `alpha/α` を含むRelease名・タグ、および `prerelease` / `draft` は通知しない。
+- `--release-tag <tag>` で指定Releaseを要約表示できる。`--send-release-to-discord` 指定時はDiscordへ送信する。
 
 ## Local Run
 
@@ -27,6 +28,8 @@
 python -m pip install -e .
 python -m codexwatch.main --dry-run
 python -m codexwatch.main --no-dry-run
+python -m codexwatch.main --release-tag rust-v0.102.0
+python -m codexwatch.main --release-tag rust-v0.102.0 --send-release-to-discord --no-dry-run
 ```
 
 ## Tests
