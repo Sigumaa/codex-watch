@@ -19,6 +19,7 @@ class Settings:
     dry_run: bool = True
     github_token: str | None = None
     openai_api_key: str | None = None
+    openai_model: str = "gpt-4.1-mini"
     discord_webhook_url: str | None = None
 
 
@@ -72,5 +73,6 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         ),
         github_token=source.get("GITHUB_TOKEN"),
         openai_api_key=source.get("OPENAI_API_KEY"),
+        openai_model=source.get("CODEXWATCH_OPENAI_MODEL", "gpt-4.1-mini"),
         discord_webhook_url=source.get("DISCORD_WEBHOOK_URL"),
     )

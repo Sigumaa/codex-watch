@@ -111,7 +111,7 @@ def test_main_raises_for_invalid_env_dry_run_without_cli_override(monkeypatch) -
         main_module.main([])
 
 
-def test_main_returns_non_zero_for_non_dry_run_not_implemented(monkeypatch) -> None:
+def test_main_returns_non_zero_for_non_dry_run_without_required_settings(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "load_settings", lambda env=None: Settings(dry_run=False))
 
     exit_code = main_module.main([])

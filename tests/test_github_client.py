@@ -10,7 +10,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from codexwatch.config import Settings
-from codexwatch.github_client import GitHubClient, PullRequest, select_unprocessed_pull_requests
+from codexwatch.github_client import (
+    GitHubClient,
+    PullRequest,
+    PullRequestDetail,
+    select_unprocessed_pull_requests,
+)
 
 
 def _utc(raw: str) -> datetime:
@@ -100,6 +105,52 @@ def test_fetch_merged_pull_requests_raises_on_http_error() -> None:
 
     with pytest.raises(httpx.HTTPStatusError):
         client.fetch_merged_pull_requests()
+
+
+def test_fetch_pull_request_detail_returns_expected_shape() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/openai/codex/pulls/123"
+        payload = {
+            "id": 123000,
+            "number": 123,
+            "title": "Improve planner",
+            "html_url": "https://example.test/pull/123",
+            "merged_at": "2026-02-16T12:00:00Z",
+            "body": "Implements better scheduling.",
+        }
+        return httpx.Response(200, json=payload)
+
+    client = GitHubClient(settings=Settings(), transport=httpx.MockTransport(handler))
+
+    detail = client.fetch_pull_request_detail(123)
+
+    assert detail == PullRequestDetail(
+        id=123000,
+        number=123,
+        title="Improve planner",
+        html_url="https://example.test/pull/123",
+        merged_at=_utc("2026-02-16T12:00:00Z"),
+        body="Implements better scheduling.",
+    )
+
+
+def test_fetch_pull_request_detail_rejects_unmerged_payload() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": 123000,
+                "number": 123,
+                "title": "Improve planner",
+                "html_url": "https://example.test/pull/123",
+                "merged_at": None,
+            },
+        )
+
+    client = GitHubClient(settings=Settings(), transport=httpx.MockTransport(handler))
+
+    with pytest.raises(ValueError, match="merged_at"):
+        client.fetch_pull_request_detail(123)
 
 
 def test_select_unprocessed_pull_requests_filters_by_last_merged_at_and_processed_ids() -> None:

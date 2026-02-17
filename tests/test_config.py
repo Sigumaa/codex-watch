@@ -20,6 +20,7 @@ def test_load_settings_defaults() -> None:
     assert settings.dry_run is True
     assert settings.github_token is None
     assert settings.openai_api_key is None
+    assert settings.openai_model == "gpt-4.1-mini"
     assert settings.discord_webhook_url is None
 
 
@@ -33,6 +34,7 @@ def test_load_settings_overrides() -> None:
             "CODEXWATCH_DRY_RUN": "false",
             "GITHUB_TOKEN": "ghp_xxx",
             "OPENAI_API_KEY": "sk-test",
+            "CODEXWATCH_OPENAI_MODEL": "gpt-test-model",
             "DISCORD_WEBHOOK_URL": "https://discord.test/webhook",
         }
     )
@@ -44,6 +46,7 @@ def test_load_settings_overrides() -> None:
     assert settings.dry_run is False
     assert settings.github_token == "ghp_xxx"
     assert settings.openai_api_key == "sk-test"
+    assert settings.openai_model == "gpt-test-model"
     assert settings.discord_webhook_url == "https://discord.test/webhook"
 
 

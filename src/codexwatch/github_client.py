@@ -18,6 +18,16 @@ class PullRequest:
     merged_at: datetime
 
 
+@dataclass(frozen=True)
+class PullRequestDetail:
+    id: int
+    number: int
+    title: str
+    html_url: str
+    merged_at: datetime
+    body: str | None = None
+
+
 def _normalize_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
@@ -47,14 +57,11 @@ class GitHubClient:
             raise ValueError("page must be greater than 0")
 
         url = f"{self._settings.github_api_url}/repos/{self._settings.github_repo}/pulls"
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        if self._settings.github_token:
-            headers["Authorization"] = f"Bearer {self._settings.github_token}"
-
-        with httpx.Client(timeout=self._timeout, transport=self._transport, headers=headers) as client:
+        with httpx.Client(
+            timeout=self._timeout,
+            transport=self._transport,
+            headers=self._build_headers(),
+        ) as client:
             response = client.get(
                 url,
                 params={
@@ -98,6 +105,45 @@ class GitHubClient:
         pull_requests.sort(key=lambda pr: (pr.merged_at, pr.id))
         return pull_requests
 
+    def fetch_pull_request_detail(self, number: int) -> PullRequestDetail:
+        if number <= 0:
+            raise ValueError("number must be greater than 0")
+
+        url = f"{self._settings.github_api_url}/repos/{self._settings.github_repo}/pulls/{number}"
+        with httpx.Client(
+            timeout=self._timeout,
+            transport=self._transport,
+            headers=self._build_headers(),
+        ) as client:
+            response = client.get(url)
+            response.raise_for_status()
+
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError("Unexpected GitHub API response format")
+
+        merged_at = data.get("merged_at")
+        if not isinstance(merged_at, str):
+            raise ValueError("Pull request detail must include merged_at")
+
+        return PullRequestDetail(
+            id=int(data["id"]),
+            number=int(data["number"]),
+            title=str(data["title"]),
+            html_url=str(data["html_url"]),
+            merged_at=_parse_github_datetime(merged_at),
+            body=_normalize_optional_text(data.get("body")),
+        )
+
+    def _build_headers(self) -> dict[str, str]:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if self._settings.github_token:
+            headers["Authorization"] = f"Bearer {self._settings.github_token}"
+        return headers
+
 
 def select_unprocessed_pull_requests(
     pull_requests: Sequence[PullRequest],
@@ -132,3 +178,12 @@ def select_unprocessed_pull_requests(
         selected.append(pull_request)
 
     return selected
+
+
+def _normalize_optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    return str(value)

@@ -5,6 +5,9 @@ on:
     - cron: "*/10 * * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   watch:
     runs-on: ubuntu-latest
@@ -17,6 +20,27 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Restore state cache
+        id: restore-state-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: state/state.json
+          key: codexwatch-state-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            codexwatch-state-${{ github.ref_name }}-
+
+      - name: Ensure state file
+        run: |
+          mkdir -p state
+          if [ ! -f state/state.json ]; then
+            cat > state/state.json <<'JSON'
+            {
+              "last_merged_at": null,
+              "processed_pr_ids": []
+            }
+            JSON
+          fi
+
       - name: Install project
         run: |
           python -m pip install --upgrade pip
@@ -24,6 +48,16 @@ jobs:
 
       - name: Run runner
         env:
-          CODEXWATCH_DRY_RUN: "true"
+          CODEXWATCH_DRY_RUN: "false"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          python -m codexwatch.main --dry-run
+          python -m codexwatch.main --no-dry-run
+
+      - name: Save state cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state/state.json
+          key: codexwatch-state-${{ github.ref_name }}-${{ github.run_id }}
