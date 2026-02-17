@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from codexwatch.state_store import (
     StateSnapshot,
     StateStore,
+    compute_next_release_state,
     compute_next_state,
     is_pr_already_processed,
 )
@@ -181,6 +182,30 @@ def test_load_raises_for_invalid_processed_pr_ids(tmp_path: Path) -> None:
         StateStore(path).load()
 
 
+def test_load_normalizes_release_state_fields(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "last_merged_at": "2026-02-17T10:00:00Z",
+                "processed_pr_ids": [1],
+                "last_release_published_at": "2026-02-17T11:00:00+00:00",
+                "processed_release_ids": ["3", 2, "2"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = StateStore(path).load()
+
+    assert state == StateSnapshot(
+        last_merged_at="2026-02-17T10:00:00Z",
+        processed_pr_ids=[1],
+        last_release_published_at="2026-02-17T11:00:00Z",
+        processed_release_ids=[2, 3],
+    )
+
+
 def test_is_pr_already_processed_uses_timestamp_and_boundary_ids() -> None:
     state = StateSnapshot(
         last_merged_at="2026-02-17T10:00:00Z",
@@ -251,6 +276,45 @@ def test_compute_next_state_keeps_current_state_when_only_older_prs_processed() 
     next_state = compute_next_state(
         current,
         [{"number": 120, "merged_at": "2026-02-17T11:00:00Z"}],
+    )
+
+    assert next_state == current
+
+
+def test_compute_next_release_state_keeps_only_latest_timestamp_ids() -> None:
+    current = StateSnapshot(
+        last_merged_at="2026-02-17T09:00:00Z",
+        processed_pr_ids=[1],
+        last_release_published_at="2026-02-17T10:00:00Z",
+        processed_release_ids=[10],
+    )
+    processed_releases = [
+        {"id": 11, "published_at": "2026-02-17T10:00:00Z"},
+        {"id": 20, "published_at": "2026-02-17T11:00:00Z"},
+        {"id": 21, "published_at": "2026-02-17T11:00:00+00:00"},
+    ]
+
+    next_state = compute_next_release_state(current, processed_releases)
+
+    assert next_state == StateSnapshot(
+        last_merged_at="2026-02-17T09:00:00Z",
+        processed_pr_ids=[1],
+        last_release_published_at="2026-02-17T11:00:00Z",
+        processed_release_ids=[20, 21],
+    )
+
+
+def test_compute_next_release_state_keeps_current_when_only_older_releases_processed() -> None:
+    current = StateSnapshot(
+        last_merged_at="2026-02-17T09:00:00Z",
+        processed_pr_ids=[1],
+        last_release_published_at="2026-02-17T11:00:00Z",
+        processed_release_ids=[20, 21],
+    )
+
+    next_state = compute_next_release_state(
+        current,
+        [{"id": 19, "published_at": "2026-02-17T10:30:00Z"}],
     )
 
     assert next_state == current

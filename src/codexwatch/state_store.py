@@ -15,12 +15,18 @@ DEFAULT_STATE_PATH = Path("state/state.json")
 class StateSnapshot:
     last_merged_at: str | None = None
     processed_pr_ids: list[int] = field(default_factory=list)
+    last_release_published_at: str | None = None
+    processed_release_ids: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        data: dict[str, object] = {
             "last_merged_at": self.last_merged_at,
             "processed_pr_ids": list(self.processed_pr_ids),
         }
+        if self.last_release_published_at is not None or self.processed_release_ids:
+            data["last_release_published_at"] = self.last_release_published_at
+            data["processed_release_ids"] = list(self.processed_release_ids)
+        return data
 
 
 class StateStore:
@@ -104,6 +110,8 @@ def compute_next_state(
         return StateSnapshot(
             last_merged_at=current_state.last_merged_at,
             processed_pr_ids=list(current_state.processed_pr_ids),
+            last_release_published_at=current_state.last_release_published_at,
+            processed_release_ids=list(current_state.processed_release_ids),
         )
 
     if current_state.last_merged_at is None:
@@ -126,11 +134,61 @@ def compute_next_state(
             latest_ids.add(pr_id)
 
     if latest_merged_at is None:
-        return StateSnapshot()
+        return StateSnapshot(
+            last_release_published_at=current_state.last_release_published_at,
+            processed_release_ids=list(current_state.processed_release_ids),
+        )
 
     return StateSnapshot(
         last_merged_at=_to_iso8601(latest_merged_at),
         processed_pr_ids=sorted(latest_ids),
+        last_release_published_at=current_state.last_release_published_at,
+        processed_release_ids=list(current_state.processed_release_ids),
+    )
+
+
+def compute_next_release_state(
+    current_state: StateSnapshot,
+    processed_releases: Sequence[object],
+) -> StateSnapshot:
+    if not processed_releases:
+        return StateSnapshot(
+            last_merged_at=current_state.last_merged_at,
+            processed_pr_ids=list(current_state.processed_pr_ids),
+            last_release_published_at=current_state.last_release_published_at,
+            processed_release_ids=list(current_state.processed_release_ids),
+        )
+
+    if current_state.last_release_published_at is None:
+        latest_published_at: datetime | None = None
+        latest_ids: set[int] = set()
+    else:
+        latest_published_at = _to_datetime(current_state.last_release_published_at)
+        latest_ids = set(current_state.processed_release_ids)
+
+    for processed_release in processed_releases:
+        release_id = _extract_release_id(processed_release)
+        release_published_at = _extract_release_published_at(processed_release)
+
+        if latest_published_at is None or release_published_at > latest_published_at:
+            latest_published_at = release_published_at
+            latest_ids = {release_id}
+            continue
+
+        if release_published_at == latest_published_at:
+            latest_ids.add(release_id)
+
+    if latest_published_at is None:
+        return StateSnapshot(
+            last_merged_at=current_state.last_merged_at,
+            processed_pr_ids=list(current_state.processed_pr_ids),
+        )
+
+    return StateSnapshot(
+        last_merged_at=current_state.last_merged_at,
+        processed_pr_ids=list(current_state.processed_pr_ids),
+        last_release_published_at=_to_iso8601(latest_published_at),
+        processed_release_ids=sorted(latest_ids),
     )
 
 
@@ -147,9 +205,23 @@ def _snapshot_from_mapping(raw: Mapping[str, object]) -> StateSnapshot:
     if not isinstance(raw_processed_pr_ids, list):
         raise ValueError("processed_pr_ids must be a list")
 
+    raw_last_release_published_at = raw.get("last_release_published_at")
+    if raw_last_release_published_at is None:
+        last_release_published_at = None
+    elif isinstance(raw_last_release_published_at, str):
+        last_release_published_at = _to_iso8601(_to_datetime(raw_last_release_published_at))
+    else:
+        raise ValueError("last_release_published_at must be an ISO8601 string or null")
+
+    raw_processed_release_ids = raw.get("processed_release_ids", [])
+    if not isinstance(raw_processed_release_ids, list):
+        raise ValueError("processed_release_ids must be a list")
+
     return StateSnapshot(
         last_merged_at=last_merged_at,
         processed_pr_ids=_normalize_processed_pr_ids(raw_processed_pr_ids),
+        last_release_published_at=last_release_published_at,
+        processed_release_ids=_normalize_processed_pr_ids(raw_processed_release_ids),
     )
 
 
@@ -182,11 +254,25 @@ def _extract_pr_id(processed_pr: object) -> int:
     return raw
 
 
+def _extract_release_id(processed_release: object) -> int:
+    raw = _read_field(processed_release, names=("id", "release_id"))
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError("Processed release must provide an integer id/release_id")
+    return raw
+
+
 def _extract_merged_at(processed_pr: object) -> datetime:
     raw = _read_field(processed_pr, names=("merged_at",))
     if isinstance(raw, str | datetime):
         return _to_datetime(raw)
     raise ValueError("Processed PR must provide merged_at as ISO8601 string or datetime")
+
+
+def _extract_release_published_at(processed_release: object) -> datetime:
+    raw = _read_field(processed_release, names=("published_at",))
+    if isinstance(raw, str | datetime):
+        return _to_datetime(raw)
+    raise ValueError("Processed release must provide published_at as ISO8601 string or datetime")
 
 
 def _read_field(processed_pr: object, *, names: tuple[str, ...]) -> object | None:

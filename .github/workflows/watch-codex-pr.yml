@@ -36,7 +36,9 @@ jobs:
             printf '%s\n' \
               '{' \
               '  "last_merged_at": null,' \
-              '  "processed_pr_ids": []' \
+              '  "processed_pr_ids": [],' \
+              '  "last_release_published_at": null,' \
+              '  "processed_release_ids": []' \
               '}' > state/state.json
           fi
 

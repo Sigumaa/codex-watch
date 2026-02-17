@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from codexwatch.config import Settings
-from codexwatch.github_client import PullRequest, PullRequestDetail
+from codexwatch.github_client import PullRequest, PullRequestDetail, Release
 from codexwatch.pipeline import PipelineRunner
 from codexwatch.state_store import StateSnapshot
 from codexwatch.summarizer import PullRequestSummary
@@ -17,6 +17,24 @@ from codexwatch.summarizer import PullRequestSummary
 
 def _utc(raw: str) -> datetime:
     return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def _release(
+    *,
+    release_id: int,
+    tag_name: str,
+    published_at: datetime,
+    name: str | None = None,
+) -> Release:
+    return Release(
+        id=release_id,
+        tag_name=tag_name,
+        name=name or tag_name,
+        html_url=f"https://github.com/openai/codex/releases/tag/{tag_name}",
+        published_at=published_at,
+        body=None,
+        prerelease=False,
+    )
 
 
 class _FakeStateStore:
@@ -41,10 +59,13 @@ class _FakeGitHubClient:
         pull_requests: list[PullRequest],
         details: dict[int, PullRequestDetail],
         events: list[str],
+        *,
+        releases: list[Release] | None = None,
     ) -> None:
         self._pull_requests = pull_requests
         self._details = details
         self._events = events
+        self._releases = releases or []
 
     def fetch_merged_pull_requests(self) -> list[PullRequest]:
         self._events.append("github.list")
@@ -54,11 +75,21 @@ class _FakeGitHubClient:
         self._events.append(f"github.detail:{number}")
         return self._details[number]
 
+    def fetch_releases(self) -> list[Release]:
+        self._events.append("github.releases")
+        return list(self._releases)
+
 
 class _FakeSummarizer:
-    def __init__(self, events: list[str], raise_for_number: int | None = None) -> None:
+    def __init__(
+        self,
+        events: list[str],
+        raise_for_number: int | None = None,
+        raise_for_release_id: int | None = None,
+    ) -> None:
         self._events = events
         self._raise_for_number = raise_for_number
+        self._raise_for_release_id = raise_for_release_id
 
     def summarize_pull_request(
         self,
@@ -73,6 +104,16 @@ class _FakeSummarizer:
             overview=f"overview-{pull_request.number}",
             feature_details=f"feature-{pull_request.number}",
             enabled_outcomes=f"outcome-{pull_request.number}",
+        )
+
+    def summarize_release(self, release: Release) -> PullRequestSummary:
+        self._events.append(f"summarize-release:{release.id}")
+        if self._raise_for_release_id == release.id:
+            raise RuntimeError("release summarizer failed")
+        return PullRequestSummary(
+            overview=f"overview-release-{release.id}",
+            feature_details=f"feature-release-{release.id}",
+            enabled_outcomes=f"outcome-release-{release.id}",
         )
 
 
@@ -154,6 +195,7 @@ def test_pipeline_non_dry_run_sends_notifications_and_saves_state() -> None:
     assert events == [
         "state.load",
         "github.list",
+        "github.releases",
         "github.detail:101",
         "summarize:101",
         "discord.send:1",
@@ -217,7 +259,7 @@ def test_pipeline_bootstraps_state_without_backfill_on_first_run() -> None:
     assert result.processed_pr_count == 0
     assert result.message == "bootstrapped without backfill"
     assert discord_client.messages == []
-    assert events == ["state.load", "github.list", "state.save"]
+    assert events == ["state.load", "github.list", "github.releases", "state.save"]
     assert state_store.saved == [
         StateSnapshot(last_merged_at="2026-02-17T09:05:00Z", processed_pr_ids=[501, 502])
     ]
@@ -315,6 +357,7 @@ def test_pipeline_after_bootstrap_sends_only_new_pull_requests() -> None:
     assert events == [
         "state.load",
         "github.list",
+        "github.releases",
         "github.detail:602",
         "summarize:602",
         "discord.send:1",
@@ -381,6 +424,7 @@ def test_pipeline_non_dry_run_saves_only_successful_notifications_if_discord_sen
     assert events == [
         "state.load",
         "github.list",
+        "github.releases",
         "github.detail:200",
         "summarize:200",
         "discord.send:1",
@@ -500,6 +544,7 @@ def test_pipeline_respects_max_notifications_per_run() -> None:
     assert events == [
         "state.load",
         "github.list",
+        "github.releases",
         "github.detail:310",
         "summarize:310",
         "discord.send:1",
@@ -512,6 +557,103 @@ def test_pipeline_respects_max_notifications_per_run() -> None:
     assert state_store.saved[-1] == StateSnapshot(
         last_merged_at="2026-02-17T12:02:00Z",
         processed_pr_ids=[311],
+    )
+
+
+def test_pipeline_bootstraps_release_state_without_backfill() -> None:
+    events: list[str] = []
+    state_store = _FakeStateStore(
+        StateSnapshot(last_merged_at="2026-02-17T12:00:00Z", processed_pr_ids=[1]),
+        events,
+    )
+    releases = [
+        _release(
+            release_id=700,
+            tag_name="v1.0.0",
+            published_at=_utc("2026-02-17T12:05:00Z"),
+        ),
+        _release(
+            release_id=701,
+            tag_name="v1.0.1",
+            published_at=_utc("2026-02-17T12:10:00Z"),
+        ),
+    ]
+
+    runner = PipelineRunner(
+        settings=Settings(dry_run=False, discord_webhook_url="https://discord.test/webhook"),
+        github_client=_FakeGitHubClient([], {}, events, releases=releases),
+        state_store=state_store,
+        summarizer=_FakeSummarizer(events),
+        discord_client=_FakeDiscordClient(events),
+    )
+
+    result = runner.run()
+
+    assert result.success is True
+    assert result.processed_pr_count == 0
+    assert result.message == "bootstrapped without backfill"
+    assert events == ["state.load", "github.list", "github.releases", "state.save"]
+    assert state_store.saved[-1] == StateSnapshot(
+        last_merged_at="2026-02-17T12:00:00Z",
+        processed_pr_ids=[1],
+        last_release_published_at="2026-02-17T12:10:00Z",
+        processed_release_ids=[701],
+    )
+
+
+def test_pipeline_sends_release_notifications_and_updates_release_state() -> None:
+    events: list[str] = []
+    state_store = _FakeStateStore(
+        StateSnapshot(
+            last_merged_at="2026-02-17T12:00:00Z",
+            processed_pr_ids=[1],
+            last_release_published_at="2026-02-17T12:00:00Z",
+            processed_release_ids=[900],
+        ),
+        events,
+    )
+    releases = [
+        _release(
+            release_id=900,
+            tag_name="v1.0.0",
+            published_at=_utc("2026-02-17T12:00:00Z"),
+        ),
+        _release(
+            release_id=901,
+            tag_name="v1.0.1",
+            published_at=_utc("2026-02-17T12:10:00Z"),
+        ),
+    ]
+    discord_client = _FakeDiscordClient(events)
+
+    runner = PipelineRunner(
+        settings=Settings(dry_run=False, discord_webhook_url="https://discord.test/webhook"),
+        github_client=_FakeGitHubClient([], {}, events, releases=releases),
+        state_store=state_store,
+        summarizer=_FakeSummarizer(events),
+        discord_client=discord_client,
+    )
+
+    result = runner.run()
+
+    assert result.success is True
+    assert result.processed_pr_count == 1
+    assert events == [
+        "state.load",
+        "github.list",
+        "github.releases",
+        "summarize-release:901",
+        "discord.send:1",
+        "state.save",
+    ]
+    assert len(discord_client.messages) == 1
+    assert "### Releaseが公開されました" in discord_client.messages[0]
+    assert "- 公開日時: 2026-02-17T12:10:00Z" in discord_client.messages[0]
+    assert state_store.saved[-1] == StateSnapshot(
+        last_merged_at="2026-02-17T12:00:00Z",
+        processed_pr_ids=[1],
+        last_release_published_at="2026-02-17T12:10:00Z",
+        processed_release_ids=[901],
     )
 
 

@@ -14,7 +14,9 @@ from codexwatch.github_client import (
     GitHubClient,
     PullRequest,
     PullRequestDetail,
+    Release,
     select_unprocessed_pull_requests,
+    select_unprocessed_releases,
 )
 
 
@@ -29,6 +31,18 @@ def _pull_request(*, pr_id: int, number: int, merged_at: datetime) -> PullReques
         title=f"PR-{number}",
         html_url=f"https://github.com/openai/codex/pull/{number}",
         merged_at=merged_at,
+    )
+
+
+def _release(*, release_id: int, tag_name: str, published_at: datetime, name: str | None = None) -> Release:
+    return Release(
+        id=release_id,
+        tag_name=tag_name,
+        name=name or tag_name,
+        html_url=f"https://github.com/openai/codex/releases/tag/{tag_name}",
+        published_at=published_at,
+        body=None,
+        prerelease=False,
     )
 
 
@@ -153,6 +167,76 @@ def test_fetch_pull_request_detail_rejects_unmerged_payload() -> None:
         client.fetch_pull_request_detail(123)
 
 
+def test_fetch_releases_filters_alpha_prerelease_and_draft() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/openai/codex/releases"
+        assert request.url.params["per_page"] == "100"
+        assert request.url.params["page"] == "1"
+        payload = [
+            {
+                "id": 200,
+                "tag_name": "v1.0.0",
+                "name": "v1.0.0",
+                "html_url": "https://example.test/release/v1.0.0",
+                "published_at": "2026-02-16T09:00:00Z",
+                "body": "stable",
+                "prerelease": False,
+                "draft": False,
+            },
+            {
+                "id": 201,
+                "tag_name": "v1.1.0-alpha.1",
+                "name": "v1.1.0-alpha.1",
+                "html_url": "https://example.test/release/v1.1.0-alpha.1",
+                "published_at": "2026-02-16T10:00:00Z",
+                "body": "alpha",
+                "prerelease": False,
+                "draft": False,
+            },
+            {
+                "id": 202,
+                "tag_name": "v1.1.0-rc.1",
+                "name": "v1.1.0-rc.1",
+                "html_url": "https://example.test/release/v1.1.0-rc.1",
+                "published_at": "2026-02-16T11:00:00Z",
+                "body": "rc",
+                "prerelease": True,
+                "draft": False,
+            },
+            {
+                "id": 203,
+                "tag_name": "v1.2.0",
+                "name": "v1.2.0",
+                "html_url": "https://example.test/release/v1.2.0",
+                "published_at": "2026-02-16T12:00:00Z",
+                "body": "draft",
+                "prerelease": False,
+                "draft": True,
+            },
+            {
+                "id": 204,
+                "tag_name": "v1.0.1",
+                "name": "v1.0.1",
+                "html_url": "https://example.test/release/v1.0.1",
+                "published_at": "2026-02-16T09:30:00Z",
+                "body": "stable patch",
+                "prerelease": False,
+                "draft": False,
+            },
+        ]
+        return httpx.Response(200, json=payload)
+
+    client = GitHubClient(settings=Settings(), transport=httpx.MockTransport(handler))
+
+    releases = client.fetch_releases()
+
+    assert [release.id for release in releases] == [200, 204]
+    assert releases[0].tag_name == "v1.0.0"
+    assert releases[1].tag_name == "v1.0.1"
+    assert releases[0].published_at == _utc("2026-02-16T09:00:00Z")
+    assert releases[1].published_at == _utc("2026-02-16T09:30:00Z")
+
+
 def test_select_unprocessed_pull_requests_filters_by_last_merged_at_and_processed_ids() -> None:
     last_merged_at = _utc("2026-02-16T10:00:00Z")
     pull_requests = [
@@ -202,3 +286,42 @@ def test_select_unprocessed_pull_requests_normalizes_naive_last_merged_at() -> N
     )
 
     assert [pr.id for pr in unprocessed] == [12]
+
+
+def test_select_unprocessed_releases_filters_by_last_published_at_and_ids() -> None:
+    last_published_at = _utc("2026-02-16T10:00:00Z")
+    releases = [
+        _release(
+            release_id=1,
+            tag_name="v1.0.0",
+            published_at=_utc("2026-02-16T09:59:59Z"),
+        ),
+        _release(
+            release_id=2,
+            tag_name="v1.0.1",
+            published_at=_utc("2026-02-16T10:00:00Z"),
+        ),
+        _release(
+            release_id=3,
+            tag_name="v1.0.2",
+            published_at=_utc("2026-02-16T10:00:00Z"),
+        ),
+        _release(
+            release_id=4,
+            tag_name="v1.1.0",
+            published_at=_utc("2026-02-16T10:10:00Z"),
+        ),
+        _release(
+            release_id=4,
+            tag_name="v1.1.0",
+            published_at=_utc("2026-02-16T10:10:00Z"),
+        ),
+    ]
+
+    unprocessed = select_unprocessed_releases(
+        releases,
+        last_published_at=last_published_at,
+        processed_release_ids={2},
+    )
+
+    assert [release.id for release in unprocessed] == [3, 4]

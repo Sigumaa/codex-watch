@@ -4,12 +4,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import json
 import logging
+from datetime import timezone
 from typing import Any
 
 from openai import OpenAI, OpenAIError
 
 from codexwatch.config import Settings
-from codexwatch.github_client import PullRequest
+from codexwatch.github_client import PullRequest, Release
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,12 @@ FALLBACK_SUMMARY = PullRequestSummary(
     overview="このPRの要約を自動生成できなかったため、PR本文を確認してください。",
     feature_details="OpenAI APIの応答取得に失敗したため、機能内容はフォールバック表示です。",
     enabled_outcomes="通知は継続されるため、PRリンクから変更点を追跡できます。",
+)
+
+FALLBACK_RELEASE_SUMMARY = PullRequestSummary(
+    overview="このReleaseの要約を自動生成できなかったため、Release本文を確認してください。",
+    feature_details="OpenAI APIの応答取得に失敗したため、機能内容はフォールバック表示です。",
+    enabled_outcomes="通知は継続されるため、Releaseリンクから変更点を追跡できます。",
 )
 
 
@@ -49,7 +56,13 @@ class Summarizer:
         detail: object | None = None,
     ) -> PullRequestSummary:
         try:
-            payload = self._request_summary_payload(pull_request, detail=detail)
+            payload = self._request_summary_payload(
+                system_prompt=(
+                    "You summarize merged GitHub pull requests. Return valid JSON only with keys "
+                    "overview, feature_details, enabled_outcomes. Keep each value concise."
+                ),
+                user_prompt=_build_pull_request_prompt(pull_request, detail=detail),
+            )
             try:
                 return _parse_summary_payload(payload)
             except ValueError as exc:
@@ -62,11 +75,32 @@ class Summarizer:
             )
             return FALLBACK_SUMMARY
 
+    def summarize_release(self, release: Release) -> PullRequestSummary:
+        try:
+            payload = self._request_summary_payload(
+                system_prompt=(
+                    "You summarize GitHub releases. Return valid JSON only with keys "
+                    "overview, feature_details, enabled_outcomes. Keep each value concise."
+                ),
+                user_prompt=_build_release_prompt(release),
+            )
+            try:
+                return _parse_summary_payload(payload)
+            except ValueError as exc:
+                raise OpenAISummaryError(str(exc)) from exc
+        except OpenAISummaryError as exc:
+            self._logger.warning(
+                "Falling back to static summary for release %s due to OpenAI failure: %s",
+                release.tag_name,
+                exc,
+            )
+            return FALLBACK_RELEASE_SUMMARY
+
     def _request_summary_payload(
         self,
-        pull_request: PullRequest,
         *,
-        detail: object | None,
+        system_prompt: str,
+        user_prompt: str,
     ) -> Mapping[str, Any]:
         client = self._get_openai_client()
         try:
@@ -77,14 +111,11 @@ class Summarizer:
                 messages=[
                     {
                         "role": "system",
-                        "content": (
-                            "You summarize GitHub pull requests. Return valid JSON only with keys "
-                            "overview, feature_details, enabled_outcomes. Keep each value concise."
-                        ),
+                        "content": system_prompt,
                     },
                     {
                         "role": "user",
-                        "content": _build_user_prompt(pull_request, detail=detail),
+                        "content": user_prompt,
                     },
                 ],
             )
@@ -117,7 +148,7 @@ class Summarizer:
         return self._openai_client
 
 
-def _build_user_prompt(pull_request: PullRequest, *, detail: object | None) -> str:
+def _build_pull_request_prompt(pull_request: PullRequest, *, detail: object | None) -> str:
     body = _extract_optional_text(detail, "body")
 
     lines = [
@@ -129,6 +160,21 @@ def _build_user_prompt(pull_request: PullRequest, *, detail: object | None) -> s
 
     if body:
         lines.extend(["Body:", body])
+
+    return "\n".join(lines)
+
+
+def _build_release_prompt(release: Release) -> str:
+    lines = [
+        "Summarize this GitHub release in Japanese.",
+        f"Release tag: {release.tag_name}",
+        f"Release name: {release.name}",
+        f"URL: {release.html_url}",
+        f"Published at: {release.published_at.astimezone(timezone.utc).isoformat()}",
+    ]
+
+    if release.body:
+        lines.extend(["Body:", release.body])
 
     return "\n".join(lines)
 

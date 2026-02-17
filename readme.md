@@ -1,6 +1,6 @@
 # codexwatch
 
-`openai/codex` の `main` マージPRを監視し、要約をDiscord Webhookへ通知する。
+`openai/codex` の `main` マージPRとReleaseを監視し、要約をDiscord Webhookへ通知する。
 
 ## Requirements
 
@@ -16,8 +16,10 @@
 ## Behavior
 
 - stateが空の初回実行では最新マージPR時点を保存し、過去PR通知は送信しない。
+- stateが空の初回実行では最新Release時点を保存し、過去Release通知は送信しない。
 - 通知成功ごとにstateを保存する。
 - 1回の実行通知件数は `CODEXWATCH_MAX_NOTIFICATIONS_PER_RUN`（default: 20）で制限する。
+- `alpha/α` を含むRelease名・タグ、および `prerelease` / `draft` は通知しない。
 
 ## Local Run
 

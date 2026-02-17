@@ -28,6 +28,17 @@ class PullRequestDetail:
     body: str | None = None
 
 
+@dataclass(frozen=True)
+class Release:
+    id: int
+    tag_name: str
+    name: str
+    html_url: str
+    published_at: datetime
+    body: str | None = None
+    prerelease: bool = False
+
+
 def _normalize_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
@@ -135,6 +146,71 @@ class GitHubClient:
             body=_normalize_optional_text(data.get("body")),
         )
 
+    def fetch_releases(self, *, per_page: int = 100, page: int = 1) -> list[Release]:
+        if per_page <= 0:
+            raise ValueError("per_page must be greater than 0")
+        if page <= 0:
+            raise ValueError("page must be greater than 0")
+
+        url = f"{self._settings.github_api_url}/repos/{self._settings.github_repo}/releases"
+        with httpx.Client(
+            timeout=self._timeout,
+            transport=self._transport,
+            headers=self._build_headers(),
+        ) as client:
+            response = client.get(
+                url,
+                params={
+                    "per_page": per_page,
+                    "page": page,
+                },
+            )
+            response.raise_for_status()
+
+        data = response.json()
+        if not isinstance(data, list):
+            raise ValueError("Unexpected GitHub API response format")
+
+        releases: list[Release] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+
+            published_at = item.get("published_at")
+            if not isinstance(published_at, str):
+                continue
+
+            if bool(item.get("draft", False)):
+                continue
+
+            tag_name = _normalize_optional_text(item.get("tag_name"))
+            if tag_name is None:
+                continue
+
+            name = _normalize_optional_text(item.get("name")) or tag_name
+            prerelease = bool(item.get("prerelease", False))
+            if _should_ignore_release(tag_name=tag_name, name=name, prerelease=prerelease):
+                continue
+
+            html_url = _normalize_optional_text(item.get("html_url"))
+            if html_url is None:
+                continue
+
+            releases.append(
+                Release(
+                    id=int(item["id"]),
+                    tag_name=tag_name,
+                    name=name,
+                    html_url=html_url,
+                    published_at=_parse_github_datetime(published_at),
+                    body=_normalize_optional_text(item.get("body")),
+                    prerelease=prerelease,
+                )
+            )
+
+        releases.sort(key=lambda release: (release.published_at, release.id))
+        return releases
+
     def _build_headers(self) -> dict[str, str]:
         headers = {
             "Accept": "application/vnd.github+json",
@@ -180,6 +256,41 @@ def select_unprocessed_pull_requests(
     return selected
 
 
+def select_unprocessed_releases(
+    releases: Sequence[Release],
+    *,
+    last_published_at: datetime | None,
+    processed_release_ids: Set[int],
+) -> list[Release]:
+    normalized_last_published_at = (
+        _normalize_utc(last_published_at) if last_published_at is not None else None
+    )
+
+    selected: list[Release] = []
+    seen_ids: set[int] = set()
+
+    for release in sorted(releases, key=lambda item: (_normalize_utc(item.published_at), item.id)):
+        if release.id in seen_ids:
+            continue
+        seen_ids.add(release.id)
+
+        published_at = _normalize_utc(release.published_at)
+
+        if normalized_last_published_at is None:
+            selected.append(release)
+            continue
+
+        if published_at < normalized_last_published_at:
+            continue
+
+        if published_at == normalized_last_published_at and release.id in processed_release_ids:
+            continue
+
+        selected.append(release)
+
+    return selected
+
+
 def _normalize_optional_text(value: object) -> str | None:
     if value is None:
         return None
@@ -187,3 +298,11 @@ def _normalize_optional_text(value: object) -> str | None:
         normalized = value.strip()
         return normalized or None
     return str(value)
+
+
+def _should_ignore_release(*, tag_name: str, name: str, prerelease: bool) -> bool:
+    if prerelease:
+        return True
+
+    text = f"{tag_name} {name}".lower()
+    return "alpha" in text or "α" in text

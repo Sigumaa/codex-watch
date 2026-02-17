@@ -11,8 +11,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from codexwatch.config import Settings
-from codexwatch.github_client import PullRequest
-from codexwatch.summarizer import FALLBACK_SUMMARY, Summarizer
+from codexwatch.github_client import PullRequest, Release
+from codexwatch.summarizer import FALLBACK_RELEASE_SUMMARY, FALLBACK_SUMMARY, Summarizer
 
 
 def _pull_request() -> PullRequest:
@@ -22,6 +22,18 @@ def _pull_request() -> PullRequest:
         title="Add improved diff analyzer",
         html_url="https://github.com/openai/codex/pull/42",
         merged_at=datetime(2026, 2, 17, 1, 2, 3, tzinfo=timezone.utc),
+    )
+
+
+def _release() -> Release:
+    return Release(
+        id=201,
+        tag_name="v1.2.3",
+        name="v1.2.3",
+        html_url="https://github.com/openai/codex/releases/tag/v1.2.3",
+        published_at=datetime(2026, 2, 17, 4, 5, 6, tzinfo=timezone.utc),
+        body="Release note body",
+        prerelease=False,
     )
 
 
@@ -117,3 +129,39 @@ def test_summarize_pull_request_falls_back_on_invalid_json_response() -> None:
     summary = summarizer.summarize_pull_request(_pull_request())
 
     assert summary == FALLBACK_SUMMARY
+
+
+def test_summarize_release_returns_structured_summary() -> None:
+    completions = _FakeCompletions(
+        content=(
+            '{"overview": "概要R", "feature_details": "機能R", "enabled_outcomes": "成果R"}'
+        )
+    )
+    summarizer = Summarizer(
+        settings=Settings(openai_api_key="sk-test", openai_model="gpt-test"),
+        openai_client=_FakeOpenAIClient(completions),
+    )
+
+    summary = summarizer.summarize_release(_release())
+
+    assert summary.overview == "概要R"
+    assert summary.feature_details == "機能R"
+    assert summary.enabled_outcomes == "成果R"
+
+    assert len(completions.calls) == 1
+    request = completions.calls[0]
+    messages = request["messages"]
+    assert isinstance(messages, list)
+    assert "Summarize this GitHub release in Japanese." in str(messages[1]["content"])
+
+
+def test_summarize_release_falls_back_when_openai_raises() -> None:
+    completions = _FakeCompletions(raise_error=OpenAIError("boom"))
+    summarizer = Summarizer(
+        settings=Settings(openai_api_key="sk-test"),
+        openai_client=_FakeOpenAIClient(completions),
+    )
+
+    summary = summarizer.summarize_release(_release())
+
+    assert summary == FALLBACK_RELEASE_SUMMARY
