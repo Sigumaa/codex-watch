@@ -16,6 +16,7 @@ class Settings:
     github_base_branch: str = "main"
     github_api_url: str = "https://api.github.com"
     poll_interval_minutes: int = 10
+    max_notifications_per_run: int = 20
     dry_run: bool = True
     github_token: str | None = None
     openai_api_key: str | None = None
@@ -65,6 +66,11 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
             "CODEXWATCH_POLL_INTERVAL_MINUTES",
             source.get("CODEXWATCH_POLL_INTERVAL_MINUTES"),
             default=10,
+        ),
+        max_notifications_per_run=_read_positive_int(
+            "CODEXWATCH_MAX_NOTIFICATIONS_PER_RUN",
+            source.get("CODEXWATCH_MAX_NOTIFICATIONS_PER_RUN"),
+            default=20,
         ),
         dry_run=_read_bool(
             "CODEXWATCH_DRY_RUN",

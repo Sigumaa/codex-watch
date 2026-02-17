@@ -7,7 +7,7 @@ import logging
 from codexwatch.config import Settings
 from codexwatch.discord_client import DiscordClient
 from codexwatch.github_client import GitHubClient, PullRequest, select_unprocessed_pull_requests
-from codexwatch.state_store import StateStore, compute_next_state
+from codexwatch.state_store import StateSnapshot, StateStore, compute_next_state
 from codexwatch.summarizer import PullRequestSummary, Summarizer
 
 
@@ -48,8 +48,22 @@ class PipelineRunner:
         sent_pull_requests: list[PullRequest] = []
         try:
             state = self._state_store.load()
-            last_merged_at = _parse_last_merged_at(state.last_merged_at)
             merged_pull_requests = self._github_client.fetch_merged_pull_requests()
+
+            if _should_bootstrap_without_backfill(state):
+                bootstrap_state = _build_bootstrap_state(merged_pull_requests)
+                if bootstrap_state is not None:
+                    self._state_store.save(bootstrap_state)
+                    self.logger.info("Bootstrapped state without backfill notifications")
+                    return RunResult(
+                        success=True,
+                        processed_pr_count=0,
+                        message="bootstrapped without backfill",
+                    )
+                self.logger.info("No merged pull requests to bootstrap")
+                return RunResult(success=True, processed_pr_count=0, message="no updates")
+
+            last_merged_at = _parse_last_merged_at(state.last_merged_at)
             unprocessed_pull_requests = select_unprocessed_pull_requests(
                 merged_pull_requests,
                 last_merged_at=last_merged_at,
@@ -60,17 +74,16 @@ class PipelineRunner:
                 self.logger.info("No unprocessed merged pull requests")
                 return RunResult(success=True, processed_pr_count=0, message="no updates")
 
-            for pull_request in unprocessed_pull_requests:
+            for pull_request in unprocessed_pull_requests[: self.settings.max_notifications_per_run]:
                 detail = self._github_client.fetch_pull_request_detail(pull_request.number)
                 summary = self._summarizer.summarize_pull_request(
                     pull_request,
                     detail=detail,
                 )
                 self._discord_client.send_message(_build_discord_message(detail, summary))
+                state = compute_next_state(state, [pull_request])
+                self._state_store.save(state)
                 sent_pull_requests.append(pull_request)
-
-            next_state = compute_next_state(state, sent_pull_requests)
-            self._state_store.save(next_state)
 
             return RunResult(
                 success=True,
@@ -100,6 +113,16 @@ def _parse_last_merged_at(raw: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _should_bootstrap_without_backfill(state: StateSnapshot) -> bool:
+    return state.last_merged_at is None and not state.processed_pr_ids
+
+
+def _build_bootstrap_state(pull_requests: list[PullRequest]) -> StateSnapshot | None:
+    if not pull_requests:
+        return None
+    return compute_next_state(StateSnapshot(), pull_requests)
 
 
 def _build_discord_message(pull_request: object, summary: PullRequestSummary) -> str:

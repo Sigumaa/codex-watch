@@ -13,6 +13,12 @@
 
 `.env.example` を参照。
 
+## Behavior
+
+- stateが空の初回実行では最新マージPR時点を保存し、過去PR通知は送信しない。
+- 通知成功ごとにstateを保存する。
+- 1回の実行通知件数は `CODEXWATCH_MAX_NOTIFICATIONS_PER_RUN`（default: 20）で制限する。
+
 ## Local Run
 
 ```bash

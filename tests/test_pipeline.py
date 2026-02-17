@@ -31,6 +31,7 @@ class _FakeStateStore:
 
     def save(self, state: StateSnapshot) -> None:
         self._events.append("state.save")
+        self._state = state
         self.saved.append(state)
 
 
@@ -156,51 +157,241 @@ def test_pipeline_non_dry_run_sends_notifications_and_saves_state() -> None:
         "github.detail:101",
         "summarize:101",
         "discord.send:1",
+        "state.save",
         "github.detail:102",
         "summarize:102",
         "discord.send:2",
         "state.save",
     ]
 
-    assert len(state_store.saved) == 1
+    assert len(state_store.saved) == 2
     assert state_store.saved[0] == StateSnapshot(
+        last_merged_at="2026-02-17T10:00:00Z",
+        processed_pr_ids=[100, 101],
+    )
+    assert state_store.saved[1] == StateSnapshot(
         last_merged_at="2026-02-17T10:05:00Z",
         processed_pr_ids=[102],
     )
 
 
-def test_pipeline_non_dry_run_does_not_save_state_if_discord_send_fails() -> None:
+def test_pipeline_bootstraps_state_without_backfill_on_first_run() -> None:
     events: list[str] = []
     state_store = _FakeStateStore(StateSnapshot(last_merged_at=None, processed_pr_ids=[]), events)
-    pull_request = PullRequest(
-        id=200,
-        number=200,
-        title="new",
-        html_url="https://github.com/openai/codex/pull/200",
-        merged_at=_utc("2026-02-17T11:00:00Z"),
-    )
-    detail = PullRequestDetail(
-        id=200,
-        number=200,
-        title="new",
-        html_url="https://github.com/openai/codex/pull/200",
-        merged_at=_utc("2026-02-17T11:00:00Z"),
-        body="body",
-    )
+    pull_requests = [
+        PullRequest(
+            id=500,
+            number=500,
+            title="past-1",
+            html_url="https://github.com/openai/codex/pull/500",
+            merged_at=_utc("2026-02-17T09:00:00Z"),
+        ),
+        PullRequest(
+            id=501,
+            number=501,
+            title="latest-a",
+            html_url="https://github.com/openai/codex/pull/501",
+            merged_at=_utc("2026-02-17T09:05:00Z"),
+        ),
+        PullRequest(
+            id=502,
+            number=502,
+            title="latest-b",
+            html_url="https://github.com/openai/codex/pull/502",
+            merged_at=_utc("2026-02-17T09:05:00Z"),
+        ),
+    ]
+    discord_client = _FakeDiscordClient(events)
 
     runner = PipelineRunner(
         settings=Settings(dry_run=False, discord_webhook_url="https://discord.test/webhook"),
-        github_client=_FakeGitHubClient([pull_request], {200: detail}, events),
+        github_client=_FakeGitHubClient(pull_requests, {}, events),
         state_store=state_store,
         summarizer=_FakeSummarizer(events),
-        discord_client=_FakeDiscordClient(events, fail_on_call=1),
+        discord_client=discord_client,
+    )
+
+    result = runner.run()
+
+    assert result.success is True
+    assert result.processed_pr_count == 0
+    assert result.message == "bootstrapped without backfill"
+    assert discord_client.messages == []
+    assert events == ["state.load", "github.list", "state.save"]
+    assert state_store.saved == [
+        StateSnapshot(last_merged_at="2026-02-17T09:05:00Z", processed_pr_ids=[501, 502])
+    ]
+
+
+def test_pipeline_after_bootstrap_sends_only_new_pull_requests() -> None:
+    bootstrap_events: list[str] = []
+    bootstrap_store = _FakeStateStore(
+        StateSnapshot(last_merged_at=None, processed_pr_ids=[]),
+        bootstrap_events,
+    )
+    initial_pull_requests = [
+        PullRequest(
+            id=600,
+            number=600,
+            title="past",
+            html_url="https://github.com/openai/codex/pull/600",
+            merged_at=_utc("2026-02-17T08:00:00Z"),
+        ),
+        PullRequest(
+            id=601,
+            number=601,
+            title="latest",
+            html_url="https://github.com/openai/codex/pull/601",
+            merged_at=_utc("2026-02-17T08:05:00Z"),
+        ),
+    ]
+
+    bootstrap_runner = PipelineRunner(
+        settings=Settings(dry_run=False, discord_webhook_url="https://discord.test/webhook"),
+        github_client=_FakeGitHubClient(initial_pull_requests, {}, bootstrap_events),
+        state_store=bootstrap_store,
+        summarizer=_FakeSummarizer(bootstrap_events),
+        discord_client=_FakeDiscordClient(bootstrap_events),
+    )
+    bootstrap_result = bootstrap_runner.run()
+
+    assert bootstrap_result.success is True
+    assert bootstrap_result.processed_pr_count == 0
+    assert bootstrap_store.saved[-1] == StateSnapshot(
+        last_merged_at="2026-02-17T08:05:00Z",
+        processed_pr_ids=[601],
+    )
+
+    events: list[str] = []
+    state_store = _FakeStateStore(bootstrap_store.saved[-1], events)
+    pull_requests = [
+        PullRequest(
+            id=600,
+            number=600,
+            title="past",
+            html_url="https://github.com/openai/codex/pull/600",
+            merged_at=_utc("2026-02-17T08:00:00Z"),
+        ),
+        PullRequest(
+            id=601,
+            number=601,
+            title="latest",
+            html_url="https://github.com/openai/codex/pull/601",
+            merged_at=_utc("2026-02-17T08:05:00Z"),
+        ),
+        PullRequest(
+            id=602,
+            number=602,
+            title="new",
+            html_url="https://github.com/openai/codex/pull/602",
+            merged_at=_utc("2026-02-17T08:10:00Z"),
+        ),
+    ]
+    details = {
+        602: PullRequestDetail(
+            id=602,
+            number=602,
+            title="new",
+            html_url="https://github.com/openai/codex/pull/602",
+            merged_at=_utc("2026-02-17T08:10:00Z"),
+            body="body-602",
+        )
+    }
+    discord_client = _FakeDiscordClient(events)
+
+    runner = PipelineRunner(
+        settings=Settings(dry_run=False, discord_webhook_url="https://discord.test/webhook"),
+        github_client=_FakeGitHubClient(pull_requests, details, events),
+        state_store=state_store,
+        summarizer=_FakeSummarizer(events),
+        discord_client=discord_client,
+    )
+
+    result = runner.run()
+
+    assert result.success is True
+    assert result.processed_pr_count == 1
+    assert len(discord_client.messages) == 1
+    assert events == [
+        "state.load",
+        "github.list",
+        "github.detail:602",
+        "summarize:602",
+        "discord.send:1",
+        "state.save",
+    ]
+    assert state_store.saved == [
+        StateSnapshot(last_merged_at="2026-02-17T08:10:00Z", processed_pr_ids=[602])
+    ]
+
+
+def test_pipeline_non_dry_run_saves_only_successful_notifications_if_discord_send_fails() -> None:
+    events: list[str] = []
+    state_store = _FakeStateStore(
+        StateSnapshot(last_merged_at="2026-02-17T10:00:00Z", processed_pr_ids=[]),
+        events,
+    )
+    pull_requests = [
+        PullRequest(
+            id=200,
+            number=200,
+            title="first",
+            html_url="https://github.com/openai/codex/pull/200",
+            merged_at=_utc("2026-02-17T11:00:00Z"),
+        ),
+        PullRequest(
+            id=201,
+            number=201,
+            title="second",
+            html_url="https://github.com/openai/codex/pull/201",
+            merged_at=_utc("2026-02-17T11:05:00Z"),
+        ),
+    ]
+    details = {
+        200: PullRequestDetail(
+            id=200,
+            number=200,
+            title="first",
+            html_url="https://github.com/openai/codex/pull/200",
+            merged_at=_utc("2026-02-17T11:00:00Z"),
+            body="body-200",
+        ),
+        201: PullRequestDetail(
+            id=201,
+            number=201,
+            title="second",
+            html_url="https://github.com/openai/codex/pull/201",
+            merged_at=_utc("2026-02-17T11:05:00Z"),
+            body="body-201",
+        ),
+    }
+
+    runner = PipelineRunner(
+        settings=Settings(dry_run=False, discord_webhook_url="https://discord.test/webhook"),
+        github_client=_FakeGitHubClient(pull_requests, details, events),
+        state_store=state_store,
+        summarizer=_FakeSummarizer(events),
+        discord_client=_FakeDiscordClient(events, fail_on_call=2),
     )
 
     result = runner.run()
 
     assert result.success is False
-    assert result.processed_pr_count == 0
-    assert state_store.saved == []
+    assert result.processed_pr_count == 1
+    assert events == [
+        "state.load",
+        "github.list",
+        "github.detail:200",
+        "summarize:200",
+        "discord.send:1",
+        "state.save",
+        "github.detail:201",
+        "summarize:201",
+        "discord.send:2",
+    ]
+    assert state_store.saved == [
+        StateSnapshot(last_merged_at="2026-02-17T11:00:00Z", processed_pr_ids=[200])
+    ]
 
 
 def test_pipeline_non_dry_run_returns_success_when_no_updates() -> None:
@@ -234,9 +425,102 @@ def test_pipeline_non_dry_run_returns_success_when_no_updates() -> None:
     assert state_store.saved == []
 
 
+def test_pipeline_respects_max_notifications_per_run() -> None:
+    events: list[str] = []
+    state_store = _FakeStateStore(
+        StateSnapshot(last_merged_at="2026-02-17T12:00:00Z", processed_pr_ids=[]),
+        events,
+    )
+    pull_requests = [
+        PullRequest(
+            id=310,
+            number=310,
+            title="new-1",
+            html_url="https://github.com/openai/codex/pull/310",
+            merged_at=_utc("2026-02-17T12:01:00Z"),
+        ),
+        PullRequest(
+            id=311,
+            number=311,
+            title="new-2",
+            html_url="https://github.com/openai/codex/pull/311",
+            merged_at=_utc("2026-02-17T12:02:00Z"),
+        ),
+        PullRequest(
+            id=312,
+            number=312,
+            title="new-3",
+            html_url="https://github.com/openai/codex/pull/312",
+            merged_at=_utc("2026-02-17T12:03:00Z"),
+        ),
+    ]
+    details = {
+        310: PullRequestDetail(
+            id=310,
+            number=310,
+            title="new-1",
+            html_url="https://github.com/openai/codex/pull/310",
+            merged_at=_utc("2026-02-17T12:01:00Z"),
+            body="body-310",
+        ),
+        311: PullRequestDetail(
+            id=311,
+            number=311,
+            title="new-2",
+            html_url="https://github.com/openai/codex/pull/311",
+            merged_at=_utc("2026-02-17T12:02:00Z"),
+            body="body-311",
+        ),
+        312: PullRequestDetail(
+            id=312,
+            number=312,
+            title="new-3",
+            html_url="https://github.com/openai/codex/pull/312",
+            merged_at=_utc("2026-02-17T12:03:00Z"),
+            body="body-312",
+        ),
+    }
+
+    runner = PipelineRunner(
+        settings=Settings(
+            dry_run=False,
+            discord_webhook_url="https://discord.test/webhook",
+            max_notifications_per_run=2,
+        ),
+        github_client=_FakeGitHubClient(pull_requests, details, events),
+        state_store=state_store,
+        summarizer=_FakeSummarizer(events),
+        discord_client=_FakeDiscordClient(events),
+    )
+
+    result = runner.run()
+
+    assert result.success is True
+    assert result.processed_pr_count == 2
+    assert events == [
+        "state.load",
+        "github.list",
+        "github.detail:310",
+        "summarize:310",
+        "discord.send:1",
+        "state.save",
+        "github.detail:311",
+        "summarize:311",
+        "discord.send:2",
+        "state.save",
+    ]
+    assert state_store.saved[-1] == StateSnapshot(
+        last_merged_at="2026-02-17T12:02:00Z",
+        processed_pr_ids=[311],
+    )
+
+
 def test_pipeline_discord_message_contains_required_sections() -> None:
     events: list[str] = []
-    state_store = _FakeStateStore(StateSnapshot(last_merged_at=None, processed_pr_ids=[]), events)
+    state_store = _FakeStateStore(
+        StateSnapshot(last_merged_at="2026-02-17T12:00:00Z", processed_pr_ids=[]),
+        events,
+    )
     pull_request = PullRequest(
         id=400,
         number=400,

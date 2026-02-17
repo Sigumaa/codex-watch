@@ -17,6 +17,7 @@ def test_load_settings_defaults() -> None:
     assert settings.github_base_branch == "main"
     assert settings.github_api_url == "https://api.github.com"
     assert settings.poll_interval_minutes == 10
+    assert settings.max_notifications_per_run == 20
     assert settings.dry_run is True
     assert settings.github_token is None
     assert settings.openai_api_key is None
@@ -31,6 +32,7 @@ def test_load_settings_overrides() -> None:
             "CODEXWATCH_GITHUB_BASE_BRANCH": "develop",
             "CODEXWATCH_GITHUB_API_URL": "https://example.com/api",
             "CODEXWATCH_POLL_INTERVAL_MINUTES": "15",
+            "CODEXWATCH_MAX_NOTIFICATIONS_PER_RUN": "5",
             "CODEXWATCH_DRY_RUN": "false",
             "GITHUB_TOKEN": "ghp_xxx",
             "OPENAI_API_KEY": "sk-test",
@@ -43,6 +45,7 @@ def test_load_settings_overrides() -> None:
     assert settings.github_base_branch == "develop"
     assert settings.github_api_url == "https://example.com/api"
     assert settings.poll_interval_minutes == 15
+    assert settings.max_notifications_per_run == 5
     assert settings.dry_run is False
     assert settings.github_token == "ghp_xxx"
     assert settings.openai_api_key == "sk-test"
@@ -53,6 +56,11 @@ def test_load_settings_overrides() -> None:
 def test_load_settings_invalid_interval() -> None:
     with pytest.raises(ValueError, match="CODEXWATCH_POLL_INTERVAL_MINUTES"):
         load_settings(env={"CODEXWATCH_POLL_INTERVAL_MINUTES": "abc"})
+
+
+def test_load_settings_invalid_max_notifications_per_run() -> None:
+    with pytest.raises(ValueError, match="CODEXWATCH_MAX_NOTIFICATIONS_PER_RUN"):
+        load_settings(env={"CODEXWATCH_MAX_NOTIFICATIONS_PER_RUN": "0"})
 
 
 def test_load_settings_invalid_dry_run() -> None:
