@@ -7,7 +7,7 @@
 - Python 3.12+
 - `OPENAI_API_KEY`
 - `DISCORD_WEBHOOK_URL`
-- `GITHUB_TOKEN`（未設定時は匿名リクエスト）
+- `GITHUB_TOKEN`
 
 ## Environment Variables
 
