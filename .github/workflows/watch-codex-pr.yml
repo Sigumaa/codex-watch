@@ -33,12 +33,11 @@ jobs:
         run: |
           mkdir -p state
           if [ ! -f state/state.json ]; then
-          cat > state/state.json <<'JSON'
-{
-  "last_merged_at": null,
-  "processed_pr_ids": []
-}
-JSON
+            printf '%s\n' \
+              '{' \
+              '  "last_merged_at": null,' \
+              '  "processed_pr_ids": []' \
+              '}' > state/state.json
           fi
 
       - name: Install project
